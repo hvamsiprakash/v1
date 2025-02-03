@@ -1,68 +1,119 @@
 import streamlit as st
-import numpy as np
 import tensorflow as tf
-from tensorflow import keras
+import numpy as np
 from PIL import Image
-import os
 import requests
+import os
 
-# Custom layer definitions for Transformer Encoder, Decoder, and Positional Embedding
-# CNN model function
+# Load the model weights from the URL
+model_url = "https://github.com/hvamsiprakash/v1/raw/main/model_weights.h5"
+model_path = "image_captioning_model_weights.h5"
+
+# Download the model weights if not already present
+if not os.path.exists(model_path):
+    st.write("Downloading model weights...")
+    response = requests.get(model_url)
+    with open(model_path, "wb") as f:
+        f.write(response.content)
+    st.write("Model weights downloaded.")
+
+# Load the model architecture and weights
+@st.cache(allow_output_mutation=True)
+def load_model():
+    # Define the model architecture (same as in your training script)
+    cnn_model = get_cnn_model()
+    encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=2)
+    decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=3)
+    caption_model = ImageCaptioningModel(cnn_model=cnn_model, encoder=encoder, decoder=decoder)
+    
+    # Load the weights
+    caption_model.load_weights(model_path)
+    return caption_model
+
+# Define the model components (same as in your training script)
 def get_cnn_model():
-    # Load EfficientNetB0 pre-trained on ImageNet, exclude the top layer
-    base_model = tf.keras.applications.EfficientNetB0(
-        input_shape=(224, 224, 3),  # Input shape for EfficientNetB0
-        include_top=False,          # Exclude the top fully connected layer
-        weights='imagenet'          # Use ImageNet weights
+    base_model = efficientnet.EfficientNetB0(
+        input_shape=(*IMAGE_SIZE, 3),
+        include_top=False,
+        weights="imagenet"
     )
-    
-    # Freeze the base model to avoid updating its weights during training
     base_model.trainable = False
-    
-    # Add a global average pooling layer to compress the features
-    x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
-    
-    # Create the final model
-    cnn_model = tf.keras.models.Model(inputs=base_model.input, outputs=x)
+    base_model_out = base_model.output
+    base_model_out = layers.Reshape((-1, base_model_out.shape[-1]))(base_model_out)
+    cnn_model = keras.models.Model(base_model.input, base_model_out)
     return cnn_model
 
-class TransformerEncoderBlock(tf.keras.layers.Layer):
+class TransformerEncoderBlock(layers.Layer):
     def __init__(self, embed_dim, dense_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
         self.embed_dim = embed_dim
         self.dense_dim = dense_dim
         self.num_heads = num_heads
-        self.attention_1 = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=embed_dim, dropout=0.0
-        )
-        self.layernorm_1 = tf.keras.layers.LayerNormalization()
-        self.layernorm_2 = tf.keras.layers.LayerNormalization()
-        self.dense_1 = tf.keras.layers.Dense(embed_dim, activation="relu")
+        self.attention_1 = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim, dropout=0.0)
+        self.layernorm_1 = layers.LayerNormalization()
+        self.layernorm_2 = layers.LayerNormalization()
+        self.dense_1 = layers.Dense(embed_dim, activation="relu")
 
     def call(self, inputs, training, mask=None):
         inputs = self.layernorm_1(inputs)
         inputs = self.dense_1(inputs)
-
-        attention_output_1 = self.attention_1(
-            query=inputs,
-            value=inputs,
-            key=inputs,
-            attention_mask=None,
-            training=training,
-        )
+        attention_output_1 = self.attention_1(query=inputs, value=inputs, key=inputs, attention_mask=None, training=training)
         out_1 = self.layernorm_2(inputs + attention_output_1)
         return out_1
 
+class TransformerDecoderBlock(layers.Layer):
+    def __init__(self, embed_dim, ff_dim, num_heads, **kwargs):
+        super().__init__(**kwargs)
+        self.embed_dim = embed_dim
+        self.ff_dim = ff_dim
+        self.num_heads = num_heads
+        self.attention_1 = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim, dropout=0.1)
+        self.cross_attention_2 = layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim, dropout=0.1)
+        self.ffn_layer_1 = layers.Dense(ff_dim, activation="relu")
+        self.ffn_layer_2 = layers.Dense(embed_dim)
+        self.layernorm_1 = layers.LayerNormalization()
+        self.layernorm_2 = layers.LayerNormalization()
+        self.layernorm_3 = layers.LayerNormalization()
+        self.embedding = PositionalEmbedding(embed_dim=EMBED_DIM, sequence_length=SEQ_LENGTH, vocab_size=VOCAB_SIZE)
+        self.out = layers.Dense(VOCAB_SIZE, activation="softmax")
+        self.dropout_1 = layers.Dropout(0.3)
+        self.dropout_2 = layers.Dropout(0.5)
+        self.supports_masking = True
 
-class PositionalEmbedding(tf.keras.layers.Layer):
+    def call(self, inputs, encoder_outputs, training, mask=None):
+        inputs = self.embedding(inputs)
+        causal_mask = self.get_causal_attention_mask(inputs)
+        if mask is not None:
+            padding_mask = tf.cast(mask[:, :, tf.newaxis], dtype=tf.int32)
+            combined_mask = tf.cast(mask[:, tf.newaxis, :], dtype=tf.int32)
+            combined_mask = tf.minimum(combined_mask, causal_mask)
+        attention_output_1 = self.attention_1(query=inputs, value=inputs, key=inputs, attention_mask=combined_mask, training=training)
+        out_1 = self.layernorm_1(inputs + attention_output_1)
+        cross_attention_output_2 = self.cross_attention_2(query=out_1, value=encoder_outputs, key=encoder_outputs, attention_mask=padding_mask, training=training)
+        out_2 = self.layernorm_2(out_1 + cross_attention_output_2)
+        ffn_out = self.ffn_layer_1(out_2)
+        ffn_out = self.dropout_1(ffn_out, training=training)
+        ffn_out = self.ffn_layer_2(ffn_out)
+        ffn_out = self.layernorm_3(ffn_out + out_2, training=training)
+        ffn_out = self.dropout_2(ffn_out, training=training)
+        preds = self.out(ffn_out)
+        return preds
+
+    def get_causal_attention_mask(self, inputs):
+        input_shape = tf.shape(inputs)
+        batch_size, sequence_length = input_shape[0], input_shape[1]
+        i = tf.range(sequence_length)[:, tf.newaxis]
+        j = tf.range(sequence_length)
+        mask = tf.cast(i >= j, dtype="int32")
+        mask = tf.reshape(mask, (1, input_shape[1], input_shape[1]))
+        mult = tf.concat([tf.expand_dims(batch_size, -1), tf.constant([1, 1], dtype=tf.int32)], axis=0)
+        return tf.tile(mask, mult)
+
+class PositionalEmbedding(layers.Layer):
     def __init__(self, sequence_length, vocab_size, embed_dim, **kwargs):
         super().__init__(**kwargs)
-        self.token_embeddings = tf.keras.layers.Embedding(
-            input_dim=vocab_size, output_dim=embed_dim
-        )
-        self.position_embeddings = tf.keras.layers.Embedding(
-            input_dim=sequence_length, output_dim=embed_dim
-        )
+        self.token_embeddings = layers.Embedding(input_dim=vocab_size, output_dim=embed_dim)
+        self.position_embeddings = layers.Embedding(input_dim=sequence_length, output_dim=embed_dim)
         self.sequence_length = sequence_length
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -79,209 +130,76 @@ class PositionalEmbedding(tf.keras.layers.Layer):
     def compute_mask(self, inputs, mask=None):
         return tf.math.not_equal(inputs, 0)
 
+class ImageCaptioningModel(keras.Model):
+    def __init__(self, cnn_model, encoder, decoder, num_captions_per_image=5, image_aug=None):
+        super().__init__()
+        self.cnn_model = cnn_model
+        self.encoder = encoder
+        self.decoder = decoder
+        self.num_captions_per_image = num_captions_per_image
+        self.image_aug = image_aug
 
-class TransformerDecoderBlock(tf.keras.layers.Layer):
-    def __init__(self, embed_dim, ff_dim, num_heads, **kwargs):
-        super().__init__(**kwargs)
-        self.embed_dim = embed_dim
-        self.ff_dim = ff_dim
-        self.num_heads = num_heads
-        self.attention_1 = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=embed_dim, dropout=0.1
-        )
-        self.attention_2 = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=embed_dim, dropout=0.1
-        )
-        self.ffn_layer_1 = tf.keras.layers.Dense(ff_dim, activation="relu")
-        self.ffn_layer_2 = tf.keras.layers.Dense(embed_dim)
+    def call(self, inputs, training=False):
+        batch_img, batch_seq = inputs
+        if self.image_aug:
+            batch_img = self.image_aug(batch_img)
+        img_embed = self.cnn_model(batch_img, training=training)
+        encoder_out = self.encoder(img_embed, training=training)
+        batch_seq_inp = batch_seq[:, :-1]
+        batch_seq_true = batch_seq[:, 1:]
+        mask = tf.math.not_equal(batch_seq_true, 0)
+        batch_seq_pred = self.decoder(batch_seq_inp, encoder_out, training=training, mask=mask)
+        return batch_seq_pred
 
-        self.layernorm_1 = tf.keras.layers.LayerNormalization()
-        self.layernorm_2 = tf.keras.layers.LayerNormalization()
-        self.layernorm_3 = tf.keras.layers.LayerNormalization()
-
-        self.embedding = PositionalEmbedding(
-            embed_dim=512, sequence_length=25, vocab_size=10000
-        )
-        self.out = tf.keras.layers.Dense(10000, activation="softmax")
-
-        self.dropout_1 = tf.keras.layers.Dropout(0.3)
-        self.dropout_2 = tf.keras.layers.Dropout(0.5)
-        self.supports_masking = True
-
-    def call(self, inputs, encoder_outputs, training, mask=None):
-        inputs = self.embedding(inputs)
-        causal_mask = self.get_causal_attention_mask(inputs)
-
-        if mask is not None:
-            padding_mask = tf.cast(mask[:, :, tf.newaxis], dtype=tf.int32)
-            combined_mask = tf.cast(mask[:, tf.newaxis, :], dtype=tf.int32)
-            combined_mask = tf.minimum(combined_mask, causal_mask)
-
-        attention_output_1 = self.attention_1(
-            query=inputs,
-            value=inputs,
-            key=inputs,
-            attention_mask=combined_mask,
-            training=training,
-        )
-        out_1 = self.layernorm_1(inputs + attention_output_1)
-
-        attention_output_2 = self.attention_2(
-            query=out_1,
-            value=encoder_outputs,
-            key=encoder_outputs,
-            attention_mask=padding_mask,
-            training=training,
-        )
-        out_2 = self.layernorm_2(out_1 + attention_output_2)
-
-        ffn_out = self.ffn_layer_1(out_2)
-        ffn_out = self.dropout_1(ffn_out, training=training)
-        ffn_out = self.ffn_layer_2(ffn_out)
-
-        ffn_out = self.layernorm_3(ffn_out + out_2, training=training)
-        ffn_out = self.dropout_2(ffn_out, training=training)
-        preds = self.out(ffn_out)
-        return preds
-
-    def get_causal_attention_mask(self, inputs):
-        input_shape = tf.shape(inputs)
-        batch_size, sequence_length = input_shape[0], input_shape[1]
-        i = tf.range(sequence_length)[:, tf.newaxis]
-        j = tf.range(sequence_length)
-        mask = tf.cast(i >= j, dtype="int32")
-        mask = tf.reshape(mask, (1, input_shape[1], input_shape[1]))
-        mult = tf.concat(
-            [tf.expand_dims(batch_size, -1), tf.constant([1, 1], dtype=tf.int32)],
-            axis=0,
-        )
-        return tf.tile(mask, mult)
-
-
-# Function to download model weights from GitHub
-def download_model_weights():
-    model_url = "https://github.com/hvamsiprakash/v1/raw/main/model_weights.h5"
-    model_weights_path = "best_model_weights.h5"
-    
-    if not os.path.exists(model_weights_path):
-        response = requests.get(model_url)
-        with open(model_weights_path, 'wb') as f:
-            f.write(response.content)
-    
-    return model_weights_path
-
-
-# Function to download model weights from GitHub
-def download_model_weights():
-    model_url = "https://github.com/hvamsiprakash/v1/raw/main/model_weights.h5"
-    model_weights_path = "best_model_weights.h5"
-    
-    if not os.path.exists(model_weights_path):
-        response = requests.get(model_url)
-        with open(model_weights_path, 'wb') as f:
-            f.write(response.content)
-    
-    return model_weights_path
-
-# Load Model (cached to avoid reloading)
-@st.cache_resource
-def load_model():
-    # Download model weights if not already available
-    model_weights_path = download_model_weights()
-    
-    # Load the model architecture and weights
-    cnn_model = get_cnn_model()
-    encoder = TransformerEncoderBlock(embed_dim=512, dense_dim=512, num_heads=1)
-    decoder = TransformerDecoderBlock(embed_dim=512, ff_dim=512, num_heads=2)
-    model = ImageCaptioningModel(
-        cnn_model=cnn_model, encoder=encoder, decoder=decoder, image_aug=None
-    )
-
-    # Load the pre-trained weights into the model
-    model.load_weights(model_weights_path)
-    return model
+# Constants
+IMAGE_SIZE = (299, 299)
+SEQ_LENGTH = 24
+VOCAB_SIZE = 13000
+EMBED_DIM = 512
+FF_DIM = 512
 
 # Load the model
-model = load_model()
+caption_model = load_model()
 
-# Load the vocabulary for text generation
-vectorization = keras.layers.TextVectorization(max_tokens=10000, output_mode="int", output_sequence_length=25)
-vocab = vectorization.get_vocabulary()
-index_lookup = dict(zip(range(len(vocab)), vocab))
+# Streamlit app
+st.title("Image Captioning with Streamlit")
+st.write("Upload an image and the model will generate a caption for it.")
 
-# Preprocess image for the model
-def preprocess_image(image):
-    img = image.resize((224, 224))  # Resize to model's input size
-    img = np.array(img) / 255.0  # Normalize
-    img = np.expand_dims(img, axis=0)  # Add batch dimension
-    return img
-
-# Function to generate caption
-def generate_caption(image):
-    image = preprocess_image(image)
-
-    # Extract features
-    img_embed = model.cnn_model(image)
-    encoded_img = model.encoder(img_embed, training=False)
-
-    # Generate caption using Transformer decoder
-    decoded_caption = "<start> "
-    max_length = 24  # Max caption length
-
-    for i in range(max_length):
-        tokenized_caption = vectorization([decoded_caption])[:, :-1]
-        mask = tf.math.not_equal(tokenized_caption, 0)
-        predictions = model.decoder(tokenized_caption, encoded_img, training=False, mask=mask)
-        sampled_token_index = np.argmax(predictions[0, i, :])
-        sampled_token = index_lookup[sampled_token_index]
-
-        if sampled_token == "<end>":
-            break
-        decoded_caption += " " + sampled_token
-
-    return decoded_caption.replace("<start> ", "").strip()
-# Streamlit UI
-
-# Set the title of the web app
-st.title("🖼️ Image Caption Generator")
-
-# Description text
-st.write("""
-    Upload an image, and the model will generate a caption for it.
-    The caption is generated using a Transformer-based model trained on the Flickr30k dataset.
-""")
-
-# Upload image functionality
-uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "png", "jpeg"])
-
-# Check if a file is uploaded
+uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 if uploaded_file is not None:
-    # Display the uploaded image
     image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image", use_column_width=True)
-    
-    # Button to generate the caption
-    if st.button("Generate Caption"):
-        # Call the generate_caption function
-        caption = generate_caption(image)
-        
-        # Display the generated caption
-        st.subheader("Generated Caption:")
-        st.write(caption)
+    st.image(image, caption='Uploaded Image.', use_column_width=True)
+    st.write("")
+    st.write("Generating caption...")
 
-# Optionally: Show some example images for demonstration
-st.subheader("Example Images")
+    # Preprocess the image
+    image = image.resize(IMAGE_SIZE)
+    image = np.array(image) / 255.0
+    image = np.expand_dims(image, axis=0)
 
-# List of example image URLs
-example_images = [
-    "https://images.unsplash.com/photo-1519681393781-d3a2c9c6b65b",
-    "https://images.unsplash.com/photo-1574158622688-01064c5ac7bb",
-    "https://images.unsplash.com/photo-1589152425047-e639b10c1b0b"
-]
+    # Generate caption
+    def greedy_algorithm(image):
+        image = tf.expand_dims(image, 0)
+        image = caption_model.cnn_model(image)
+        encoded_img = caption_model.encoder(image, training=False)
+        decoded_caption = "<start> "
+        for i in range(SEQ_LENGTH - 1):
+            tokenized_caption = vectorization([decoded_caption])[:, :-1]
+            mask = tf.math.not_equal(tokenized_caption, 0)
+            predictions = caption_model.decoder(tokenized_caption, encoded_img, training=False, mask=mask)
+            sampled_token_index = np.argmax(predictions[0, i, :])
+            sampled_token = INDEX_TO_WORD[sampled_token_index]
+            if sampled_token == "<end>":
+                break
+            decoded_caption += " " + sampled_token
+        decoded_caption = decoded_caption.replace("<start> ", "")
+        decoded_caption = decoded_caption.replace(" <end>", "").strip()
+        return decoded_caption
 
-# Display example images with generated captions
-for img_url in example_images:
-    img = Image.open(tf.keras.utils.get_file(img_url.split("/")[-1], img_url))
-    st.image(img, caption="Example Image", use_column_width=True)
-    caption = generate_caption(img)
-    st.write(f"**Generated Caption:** {caption}")
+    # Get the vocabulary
+    vocab = vectorization.get_vocabulary()
+    INDEX_TO_WORD = {idx: word for idx, word in enumerate(vocab)}
+
+    # Generate the caption
+    caption = greedy_algorithm(image)
+    st.write("Generated Caption:", caption)
