@@ -4,6 +4,9 @@ import numpy as np
 from PIL import Image
 import requests
 import os
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import efficientnet
+from tensorflow.keras.layers import TextVectorization
 
 # Load the model weights from the URL
 model_url = "https://github.com/hvamsiprakash/v1/raw/main/model_weights.h5"
@@ -40,7 +43,7 @@ def get_cnn_model():
     base_model.trainable = False
     base_model_out = base_model.output
     base_model_out = layers.Reshape((-1, base_model_out.shape[-1]))(base_model_out)
-    cnn_model = keras.models.Model(base_model.input, base_model_out)
+    cnn_model = models.Model(base_model.input, base_model_out)
     return cnn_model
 
 class TransformerEncoderBlock(layers.Layer):
@@ -130,7 +133,7 @@ class PositionalEmbedding(layers.Layer):
     def compute_mask(self, inputs, mask=None):
         return tf.math.not_equal(inputs, 0)
 
-class ImageCaptioningModel(keras.Model):
+class ImageCaptioningModel(models.Model):
     def __init__(self, cnn_model, encoder, decoder, num_captions_per_image=5, image_aug=None):
         super().__init__()
         self.cnn_model = cnn_model
