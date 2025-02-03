@@ -7,6 +7,24 @@ import os
 import requests
 
 # Custom layer definitions for Transformer Encoder, Decoder, and Positional Embedding
+# CNN model function
+def get_cnn_model():
+    # Load EfficientNetB0 pre-trained on ImageNet, exclude the top layer
+    base_model = tf.keras.applications.EfficientNetB0(
+        input_shape=(224, 224, 3),  # Input shape for EfficientNetB0
+        include_top=False,          # Exclude the top fully connected layer
+        weights='imagenet'          # Use ImageNet weights
+    )
+    
+    # Freeze the base model to avoid updating its weights during training
+    base_model.trainable = False
+    
+    # Add a global average pooling layer to compress the features
+    x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
+    
+    # Create the final model
+    cnn_model = tf.keras.models.Model(inputs=base_model.input, outputs=x)
+    return cnn_model
 
 class TransformerEncoderBlock(tf.keras.layers.Layer):
     def __init__(self, embed_dim, dense_dim, num_heads, **kwargs):
@@ -152,6 +170,18 @@ def download_model_weights():
     
     return model_weights_path
 
+
+# Function to download model weights from GitHub
+def download_model_weights():
+    model_url = "https://github.com/hvamsiprakash/v1/raw/main/model_weights.h5"
+    model_weights_path = "best_model_weights.h5"
+    
+    if not os.path.exists(model_weights_path):
+        response = requests.get(model_url)
+        with open(model_weights_path, 'wb') as f:
+            f.write(response.content)
+    
+    return model_weights_path
 
 # Load Model (cached to avoid reloading)
 @st.cache_resource
